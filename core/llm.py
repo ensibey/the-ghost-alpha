@@ -1,10 +1,14 @@
 from crewai import LLM
 from langchain_groq import ChatGroq
+import os
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 def get_local_llm():
     """
