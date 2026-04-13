@@ -1,0 +1,19 @@
+# Environments / Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# Outputs
+*.csv
+*.log
+
+# System Files
+.DS_Store
+Thumbs.db

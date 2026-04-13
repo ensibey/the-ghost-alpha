@@ -1,0 +1,11 @@
+crewai
+crewai-tools
+langchain-community
+langchain-groq
+langchain-ollama
+playwright
+playwright-stealth
+supabase
+python-dotenv
+httpx
+beautifulsoup4
