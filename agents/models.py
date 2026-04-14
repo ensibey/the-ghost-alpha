@@ -1,37 +1,53 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+
+class SignalData(BaseModel):
+    """Inner data payload — varies by category."""
+    title: str = Field(description="Name of the repo, token, product or company.")
+    source: str = Field(description="Platform the data was pulled from (e.g. GitHub, DexScreener, Reddit).")
+    insight: str = Field(description="One concise sentence explaining WHY this is significant right now.")
+    # Optional category-specific fields
+    growth_rate: Optional[str] = Field(default=None, description="Growth % per hour or day where applicable.")
+    contract_address: Optional[str] = Field(default=None, description="On-chain contract address for crypto signals.")
+    whale_signal: Optional[bool] = Field(default=None, description="True if large wallet accumulation detected.")
+    risk_score: Optional[float] = Field(default=None, description="Risk level 1-10. 10 = highest risk.", ge=1, le=10)
+    supply_link: Optional[str] = Field(default=None, description="AliExpress or Alibaba supplier link for e-commerce signals.")
+    competitor: Optional[str] = Field(default=None, description="Main competitor for tech/software signals.")
+    company_name: Optional[str] = Field(default=None, description="Company name for B2B lead signals.")
+    funding_amount: Optional[str] = Field(default=None, description="Latest funding round amount.")
+    decision_maker: Optional[str] = Field(default=None, description="CEO or CTO name for B2B outreach.")
+    open_positions: Optional[str] = Field(default=None, description="Job titles the company is actively hiring.")
+    source_url: Optional[str] = Field(default=None, description="Direct link to the original signal.")
+
 
 class IntelligenceOutput(BaseModel):
     """
-    Kullanıcının belirlediği filtreleme şeması.
-    Eğer data çöp ise LLM bu alanları None/Null bırakır veya seviyeyi 0 yapar.
+    RapidAPI-Ready standardized output schema.
+    Every signal produced by The Ghost Alpha MUST conform to this shape.
+    If incoming data is noise, set signal_strength to 1 or below and leave data fields minimal.
     """
-    firsat_tipi: Optional[str] = Field(
-        default=None, 
-        description="Fırsatın türü (Örn: 'yeni ürün', 'yükselen trend', 'arbitraj'). Eğer içerik çöp (fırsat yok) ise null/None bırakın."
+    timestamp: str = Field(
+        default_factory=lambda: datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+        description="UTC timestamp of signal generation."
     )
-    seviye: Optional[int] = Field(
-        default=None, 
-        description="Fırsatın büyüklük seviyesi (1-10 arası). Eğer içerik çöp ise null/None bırakın.",
-        ge=1, le=10
+    category: str = Field(
+        description="One of: Software | Crypto | E-Commerce | B2B"
     )
-    neden: Optional[str] = Field(
-        default=None, 
-        description="Neden bu bir fırsat olarak görülüyor? Kısaca açıklayın. İçerik çöp ise null/None bırakın."
+    signal_strength: float = Field(
+        description=(
+            "Overall signal quality score 1.0-10.0. "
+            "1-4: noise/weak, 5-7: moderate, 8-9: strong, 9.5-10: rare alpha. "
+            "Only signals >= 8 get pushed to Telegram."
+        ),
+        ge=1.0, le=10.0
     )
-    kaynak_url: Optional[str] = Field(
-        default=None,
-        description="Bu verinin çekildiği tam URL adresi (Orijinal Link). Satışta kanıt için gereklidir."
-    )
-    platform_ismi: Optional[str] = Field(
-        default=None,
-        description="Verinin geldiği ana platformun adı (Örn: Reddit, Github, eBay, X). Baş harfi büyük olsun."
-    )
-    strateji: Optional[str] = Field(
-        default=None,
-        description="Bu veriden nasıl para kazanılır? Stratejist ajanı tarafından doldurulur."
-    )
-    pazarlama_metni: Optional[str] = Field(
-        default=None,
-        description="Verinin satışını kolaylaştıracak AI-Ready pazarlama metni veya blog yazısı."
+    data: SignalData = Field(description="Category-specific structured payload.")
+    action_tip: str = Field(
+        description=(
+            "A single, immediately actionable advice sentence. "
+            "Written as if advising a smart investor or entrepreneur. "
+            "Example: 'Buy domain {keyword}.io before it trends; high demand expected in Q3 2026.'"
+        )
     )

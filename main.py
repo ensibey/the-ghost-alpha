@@ -1,187 +1,211 @@
 import os
-import json
 import time
+import json
 import concurrent.futures
-from crewai import Crew, Process, Task
+from datetime import datetime
 from dotenv import load_dotenv
+from crewai import Crew, Process, Task
 
-# Database & Local Export
-from core.database import save_to_db
-from core.local_exporter import export_to_local_csv
+# Core
+from core.local_exporter import export_signal
 from core.notifier import send_telegram_signal
+from core.database import save_to_db
 
-# Agents & Schemas (Function Wrappers)
-from agents.signal_bot import create_signal_bot
-from agents.dev_bot import create_dev_bot
-from agents.market_bot import create_market_bot
-from agents.analyzer_agent import create_analyzer_agent
+# Scrapers
+from scrapers.tech_scraper import get_tech_signals
+from scrapers.crypto_scraper import get_crypto_signals
+from scrapers.ecommerce_scraper import get_ecommerce_signals
+from scrapers.b2b_scraper import get_b2b_signals
+
+# Agents
+from agents.analyzer_agent import (
+    create_tech_analyzer,
+    create_crypto_analyzer,
+    create_ecommerce_analyzer,
+    create_b2b_analyzer,
+)
 from agents.strategist_agent import create_strategist_agent
 from agents.writer_agent import create_writer_agent
 from agents.models import IntelligenceOutput
 
-def make_intelligence_callback(category_name, source_url):
-    """Her URL'ye özel ayrıştırılmış bağımsız callback döngüsü."""
-    def handle_intelligence_output(task_output):
-        if task_output.pydantic:
-            data = task_output.pydantic.dict()
-            if data.get("firsat_tipi") is not None and data.get("seviye") is not None:
-                print(f"\n[🚀 BAŞARILI] {category_name} -> Özel Sinyal Yakalandı: Seviye {data['seviye']}")
-                export_to_local_csv(category_name, data)
-                save_to_db("ai_filtered_opportunities", {"data": data})
-                
-                # Sadece Seviye 5 ve üstü fırsatları Telegram'a at (Gürültü engelleme)
-                if int(data.get("seviye", 0)) >= 5:
-                    send_telegram_signal(category_name, data)
-            else:
-                print(f"[-] Null (Çöp) veri elendi -> {source_url}")
-    return handle_intelligence_output
 
-def process_single_target(payload):
+# ──────────────────────────────────────────────────
+# CATEGORY REGISTRY
+# Each entry: (category_name, scraper_fn, analyzer_factory)
+# ──────────────────────────────────────────────────
+CATEGORY_REGISTRY = [
+    ("Software",    get_tech_signals,       create_tech_analyzer),
+    ("Crypto",      get_crypto_signals,     create_crypto_analyzer),
+    ("E-Commerce",  get_ecommerce_signals,  create_ecommerce_analyzer),
+    ("B2B",         get_b2b_signals,        create_b2b_analyzer),
+]
+
+
+def process_category(category_name: str, scraper_fn, analyzer_factory) -> list:
     """
-    Bu fonksiyon ThreadPoolExecutor tarafından çağrılır. Her URL için BAĞIMSIZ 
-    bir 'Mini-Özel-Ajan Ekibi (Micro Crew)' inşa eder. Bu sayede RAM izolasyonu 
-    sağlanır ve Playwright Chromium sekmeleri birbirine karışmaz (Thread-Safe).
+    Run the full intelligence pipeline for one category.
+    Returns a list of valid IntelligenceOutput dicts.
     """
-    url, category_name, bot_factory = payload
-    
-    # 1. Kendi izole süreçleri için Ajan yaratım (Her Thread kendi ajanını kullanır)
-    special_bot = bot_factory()
-    ai_filter = create_analyzer_agent()
-    ai_strategist = create_strategist_agent()
-    ai_writer = create_writer_agent()
-    
-    # 2. Spesifik Görev Ataması
-    scrape_task = Task(
-        description=f"Visit explicitly '{url}' and extract all crucial latest information, text, prices or trends.", 
-        expected_output=f"Raw text dump representing the page content from {url}", 
-        agent=special_bot
-    )
-    
-    filter_task = Task(
+    print(f"\n[⚡ START] {category_name} pipeline firing...")
+
+    # 1. Scrape data
+    try:
+        raw_data = scraper_fn()
+    except Exception as e:
+        print(f"[{category_name}] Scraper failed: {e}")
+        return []
+
+    if not raw_data or raw_data.strip().startswith("No "):
+        print(f"[{category_name}] No data retrieved. Skipping.")
+        return []
+
+    # 2. Build agents (fresh per run → no memory bleed between threads)
+    analyzer = analyzer_factory()
+    strategist = create_strategist_agent()
+    writer = create_writer_agent()
+
+    # 3. Define tasks
+    analyze_task = Task(
         description=(
-            "Sen The Ghost Alpha zeka çekirdeğisin. Aşağıdaki profesyonel pazar verisini analiz et.\n"
-            "Gelen veriden pazarın en sıcak ve kârlı noktalarını (yazılım trendleri, on-chain sinyalleri, arbitraj) bul.\n"
-            "Çöp veriyi kesinlikle elenmeli. Sadece yüksek kaliteli olanları bırak."
+            f"You are analyzing {category_name} market intelligence data.\n\n"
+            f"RAW DATA:\n{raw_data}\n\n"
+            f"Your job: Filter noise, identify the TOP 3 most significant signals in this data. "
+            f"For each signal, explain what it is and why it matters RIGHT NOW. "
+            f"If everything is noise, say 'NO SIGNALS FOUND'."
         ),
-        expected_output="Filtered quality signal text or 'null'.",
-        agent=ai_filter
+        expected_output=(
+            "A numbered list of up to 3 high-quality signals, each with: "
+            "Signal name, why it's significant, and the source URL."
+        ),
+        agent=analyzer,
     )
-    
+
     strategy_task = Task(
         description=(
-            "Eğer veri kaliteliyse (null değilse), bu fırsattan nasıl para kazanılacağına dair "
-            "kesin ve etkili bir 'Pazar Stratejisi' (Monetization Strategy) geliştir. "
-            "Domain alımı, içerik üretimi, satış kanalı önerisi veya yatırım tavsiyesi ver."
+            f"Take the {category_name} signals identified by the analyst. "
+            f"For each signal:\n"
+            f"1. Assign a signal_strength score (1.0-10.0) using the strict scoring criteria in your instructions.\n"
+            f"2. Write one concrete action_tip sentence.\n"
+            f"3. Identify the category as: {category_name}\n"
+            f"If the analyst found no signals, output signal_strength 1.0 and minimal data."
         ),
-        expected_output="A concrete and actionable strategy text.",
-        agent=ai_strategist
+        expected_output=(
+            "For each signal: signal_strength score with justification, and a single action_tip sentence."
+        ),
+        agent=strategist,
+        context=[analyze_task],
     )
-    
+
     packaging_task = Task(
         description=(
-            "Strateji ve sinyal verisini al. Bunları 'AI-Ready' bir pazarlama metni haline getir. "
-            "Ayrıca tüm veriyi (Fırsat Tipi, Seviye, Neden, Kaynak URL, Platform, Strateji, Pazarlama Metni) "
-            "tam bir JSON objesi olarak yapılandır."
+            f"Package each scored {category_name} signal into the exact IntelligenceOutput schema. "
+            f"Rules:\n"
+            f"- category MUST be exactly: '{category_name}'\n"
+            f"- timestamp MUST be current UTC time\n"
+            f"- signal_strength MUST match the strategist's score\n"
+            f"- data.title: short name (max 60 chars)\n"
+            f"- data.source: platform name only\n"
+            f"- data.insight: exactly 15-25 words explaining the significance\n"
+            f"- action_tip: single sentence, direct imperative\n"
+            f"Package the SINGLE BEST signal if multiple exist."
         ),
-        expected_output="Full JSON object with Strategy and Marketing Content.",
-        agent=ai_writer,
+        expected_output="A single valid IntelligenceOutput JSON object.",
+        agent=writer,
         output_pydantic=IntelligenceOutput,
-        callback=make_intelligence_callback(category_name, url)
+        context=[analyze_task, strategy_task],
     )
-    
-    packaging_task.context = [scrape_task, filter_task, strategy_task]
-    
-    # 3. Yalnızca bu URL için Mikro Ekip (Mini Crew) - Sequential Process (Filter -> Strat -> Write)
-    mini_crew = Crew(
-        agents=[special_bot, ai_filter, ai_strategist, ai_writer],
-        tasks=[scrape_task, filter_task, strategy_task, packaging_task],
+
+    # 4. Run the crew
+    crew = Crew(
+        agents=[analyzer, strategist, writer],
+        tasks=[analyze_task, strategy_task, packaging_task],
         process=Process.sequential,
-        verbose=False 
+        verbose=False,
     )
-    
-    print(f"[*] Thread Başladı: {category_name} -> {url}")
+
+    results = []
     try:
-        mini_crew.kickoff()
+        output = crew.kickoff()
+        if output.pydantic:
+            signal_dict = output.pydantic.dict()
+            strength = float(signal_dict.get("signal_strength", 0))
+            print(f"[{category_name}] ✅ Signal packaged. Score: {strength}/10")
+
+            # 5. Export & notify
+            export_signal(signal_dict)
+            save_to_db("intelligence_signals", {"data": signal_dict})
+            send_telegram_signal(signal_dict)
+            results.append(signal_dict)
+        else:
+            print(f"[{category_name}] No valid structured output produced.")
     except Exception as e:
-        print(f"[!] Hata Alındı ({url}): {e}")
+        print(f"[{category_name}] Pipeline error: {e}")
+
+    return results
+
+
+def run_one_cycle():
+    """Run all 4 category pipelines in parallel threads."""
+    print(f"\n{'='*60}")
+    print(f"  CYCLE START — {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"{'='*60}")
+
+    all_signals = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(process_category, name, scraper, analyzer): name
+            for name, scraper, analyzer in CATEGORY_REGISTRY
+        }
+        for future in concurrent.futures.as_completed(futures):
+            category_name = futures[future]
+            try:
+                signals = future.result()
+                all_signals.extend(signals)
+            except Exception as e:
+                print(f"[{category_name}] Unhandled thread error: {e}")
+
+    strong = [s for s in all_signals if float(s.get("signal_strength", 0)) >= 8.0]
+    print(f"\n{'='*60}")
+    print(f"  CYCLE COMPLETE — {len(all_signals)} signals | {len(strong)} high-alpha (≥8)")
+    print(f"{'='*60}\n")
+    return all_signals
+
 
 def main():
-    print("==================================================")
-    print(" THE GHOST ALPHA - CONTINUOUS AUTONOMOUS ENGINE")
-    print("==================================================")
+    print("=" * 60)
+    print("  THE GHOST ALPHA v2.0 — CONTINUOUS INTELLIGENCE ENGINE")
+    print("  Categories: Software | Crypto | E-Commerce | B2B")
+    print("=" * 60)
     load_dotenv()
-    
-    # ----------------- DEVELOPE HEDEF HAVUZLARI (MASSIVE & PRO SCALE) -----------------
-    # 2026 Model: Sadece site gezmiyoruz, on-chain ve derin pazar süzgecine iniyoruz.
-    signal_targets = [
-        "https://news.ycombinator.com/",
-        "https://old.reddit.com/r/CryptoCurrency/new/",
-        "https://old.reddit.com/r/WallStreetBets/new/",
-        "https://old.reddit.com/r/Solana/new/",
-        "https://old.reddit.com/r/Entrepreneur/",
-    ]
-    
-    dev_targets = [
-        "https://github.com/search?q=stars:>1000+s:updated&type=repositories",
-        "https://github.com/search?q=stars:>5000+s:updated&type=repositories",
-        "https://github.com/trending/python?since=daily",
-        "https://huggingface.co/papers"
-    ]
-    
-    market_targets = [
-        "https://pump.fun/board",
-        "https://dexscreener.com/gainers",
-        "https://www.ebay.com/sch/i.html?_nkw=rtx+4090&_sop=10",
-        "https://www.ebay.com/sch/i.html?_nkw=macbook+pro+m3+max&_sop=10"
-    ]
-    
-    # Savaş Alanı Planlaması (Payloads)
-    # Hangi URL, Hangi Kategori İsmiyle ve Hangi Bot Fonksiyonu ile çalıştırılacak?
-    payloads = []
-    for url in signal_targets:
-        payloads.append((url, "Piyasa_Sinyalleri", create_signal_bot))
-    for url in dev_targets:
-        payloads.append((url, "Gelistirici_Trendleri", create_dev_bot))
-    for url in market_targets:
-        payloads.append((url, "Arbitraj_Sinyalleri", create_market_bot))
-        
-    total_urls = len(payloads)
-    print(f"[#] Toplam Keşfedilecek Kaynak: {total_urls}")
-    print(f"[#] Bilgisayarı koruma (RAM) sınırı: Aynı Asenkron Anda 5 Sekme\n")
-    
-    # --- ZAMAN YÖNETIMI VE SÜREKLI DÖNGÜ ---
-    start_time = time.time()
-    max_duration = (5 * 3600) + (45 * 60) # 5 Saat 45 Dakika limiti
-    cycle_count = 1
-    sleep_duration_seconds = 180 # 3 dakika dinlenme koruması (IP ban yememek için)
-    
-    while True:
-        current_time = time.time()
-        elapsed = current_time - start_time
-        
-        # GitHub Actions güvenlik limiti kontrolü (Max 6 saate takılmamak için önceden çık)
-        if elapsed > max_duration:
-            print(f"\n[SİSTEM UYARISI] 5 Saat 45 Dakikalık güvenli çalışma sınırı aşıldı! (Geçen süre: {int(elapsed/60)} dk)")
-            print("[SİSTEM UYARISI] GitHub Action'ın kaza ile kapanmaması için sistem kendini GÜVENLİ ve başarılı bir şekilde DURDURUYOR.")
-            print("[SİSTEM UYARISI] Bir sonraki Cron tetikleyicisi bekleniyor...")
-            break
-            
-        print(f"\n==================================================")
-        print(f" [🔥] TARAMA DÖNGÜSÜ {cycle_count} BAŞLIYOR... (Kalan Güvenli Süre: {int((max_duration-elapsed)/60)} dk)")
-        print(f"==================================================")
 
-        # Asenkron İşçi Havuzunu (Thread Pool) tetikle!
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            list(executor.map(process_single_target, payloads))
-            
-        print(f"\n[!] Döngü {cycle_count} Tamamlandı.")
-        print(f"[*] Hedef sitelerin siber saldırı algılamaması için {int(sleep_duration_seconds/60)} dakika ZORUNLU DİNLENME moduna geçiliyor zzz...")
-        time.sleep(sleep_duration_seconds)
-        cycle_count += 1
-        
-    print("\n==================================================")
-    print(" GHOST ALPHA MOTORU GÜVENLİ OLARAK KAPANDI.")
-    print("==================================================")
+    # ── Continuous loop config ──
+    start_time = time.time()
+    max_duration_seconds = (5 * 3600) + (45 * 60)  # 5h 45m — safe GitHub Actions exit
+    cycle_sleep_seconds = 180  # 3 minutes between cycles (anti-ban + rate limit)
+    cycle_number = 1
+
+    while True:
+        elapsed = time.time() - start_time
+        remaining_minutes = int((max_duration_seconds - elapsed) / 60)
+
+        # Safe exit before GitHub Actions hard-kills the process
+        if elapsed >= max_duration_seconds:
+            print("\n[⏰ SYSTEM] 5h45m safe limit reached. Exiting cleanly.")
+            print("[⏰ SYSTEM] Next GitHub Actions Cron will resume the watch.")
+            break
+
+        print(f"\n[🔥 CYCLE {cycle_number}] Starting... (Remaining safe window: {remaining_minutes} min)")
+        run_one_cycle()
+
+        print(f"[💤 SLEEP] {cycle_sleep_seconds // 60}m rest between cycles (rate-limit protection)...")
+        time.sleep(cycle_sleep_seconds)
+        cycle_number += 1
+
+    print("\n" + "=" * 60)
+    print("  GHOST ALPHA ENGINE SHUT DOWN CLEANLY.")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
