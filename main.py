@@ -8,7 +8,7 @@ from crewai import Crew, Process, Task
 
 # Core
 from core.local_exporter import export_signal
-from core.database import save_to_db
+from core.database import save_opportunity
 
 # Scrapers
 from scrapers.tech_scraper import get_tech_signals
@@ -132,7 +132,7 @@ def process_category(category_name: str, scraper_fn, analyzer_factory) -> list:
 
             # 5. Export & notify
             export_signal(signal_dict)
-            save_to_db("intelligence_signals", {"data": signal_dict})
+            save_opportunity(signal_dict)
             results.append(signal_dict)
         else:
             print(f"[{category_name}] No valid structured output produced.")
