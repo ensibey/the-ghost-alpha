@@ -1,6 +1,8 @@
 name: The Ghost Alpha v2.0 — 24/7 Intelligence Engine
 
 on:
+  push:
+    branches: [ main ]
   schedule:
     # Fires every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)
     # Each run loops for 5h45m then exits cleanly — achieving near-continuous coverage
