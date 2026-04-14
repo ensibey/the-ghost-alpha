@@ -8,7 +8,6 @@ from crewai import Crew, Process, Task
 
 # Core
 from core.local_exporter import export_signal
-from core.notifier import send_telegram_signal
 from core.database import save_to_db
 
 # Scrapers
@@ -134,7 +133,6 @@ def process_category(category_name: str, scraper_fn, analyzer_factory) -> list:
             # 5. Export & notify
             export_signal(signal_dict)
             save_to_db("intelligence_signals", {"data": signal_dict})
-            send_telegram_signal(signal_dict)
             results.append(signal_dict)
         else:
             print(f"[{category_name}] No valid structured output produced.")
